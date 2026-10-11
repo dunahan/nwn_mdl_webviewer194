@@ -1,0 +1,82 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [ "main", "master" ]
+    paths-ignore:
+      - 'wasm/**'
+      - 'js/cleanmodels_wasm.js'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version string to inject (e.g. v1.2.3). Falls back to latest git tag.'
+        required: false
+        default: ''
+  workflow_call:
+    inputs:
+      version:
+        description: 'Version string passed from release.yml'
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          fetch-tags: true   # Explicitly request that all tags be loaded
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+
+      - name: Determine version
+        id: ver
+        run: |
+          # Priority: workflow_call/dispatch input → latest Git tag → empty
+          VERSION="${{ inputs.version }}"
+          if [ -z "$VERSION" ]; then
+            # Searches all tags, sorts them in descending order according to semantic versioning, and takes the first one.
+            VERSION=$(git tag --sort=-v:refname | head -n 1 || echo "")
+          fi
+          if [ -z "$VERSION" ]; then
+            # Fallback if no tag was found (e.g., push-deploy without
+            # tag context or a race condition with a parallel trigger): returns the exact
+            # tag, "vX.Y.Z-N-gSHA" (based on the tag), or—as a last resort—the
+            # short SHA; practically never empty.
+            VERSION=$(git describe --tags --always 2>/dev/null || echo "")
+          fi
+          echo "name=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+
+      - name: Run build script
+        run: python build.py --version "${{ steps.ver.outputs.name }}"
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v6
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: './dist'
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

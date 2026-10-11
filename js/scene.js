@@ -1,0 +1,308 @@
+/* ═══════════════════════════════════════════════
+   NWN MDL Viewer — Three.js Scene & Orbit Controls
+   ═══════════════════════════════════════════════ */
+
+//  Three.js scene
+// ─────────────────────────────────────────────
+const canvas   = document.getElementById('canvas');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.setClearColor(0x0a0c0f);
+
+// Update for r152
+// r152: ColorManagement is true by default — explicitly set here.
+// Hex colors are automatically converted from sRGB to linear.
+THREE.ColorManagement.enabled = true;
+
+const scene  = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 5000);
+camera.position.set(2, 2, 4);
+camera.lookAt(0, 0, 0);
+
+// Lights, updates for r152
+// FIX: Reduced directional intensities to avoid over-bright specular peaks on
+// Phong-converted PBR materials. Ambient raised to compensate shadow-side darkness.
+// dirLight  1.4 → 0.9  (main sun: was too strong for corrected low-metalness mats)
+// dirLight2 0.6 → 0.4  (fill:    proportional reduction)
+// ambient   0.5 → 0.7  (raised so dark sides stay readable)
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+scene.add(ambientLight);
+
+const dirLight = new THREE.DirectionalLight(0xfff0d0, 0.9);
+dirLight.position.set(5, 10, 8);
+dirLight.castShadow = true;
+scene.add(dirLight);
+
+const dirLight2 = new THREE.DirectionalLight(0xd0e0ff, 0.4);
+dirLight2.position.set(-6, 3, -5);
+scene.add(dirLight2);
+
+// Grid, update for r152
+const gridHelper = new THREE.GridHelper(10, 20, 0x4a5a6a, 0x3a4858);
+scene.add(gridHelper);
+
+// Opaque Impact Surface (hidden by default)
+const floorGeo  = new THREE.PlaneGeometry(20, 20);
+const floorMat  = new THREE.MeshStandardMaterial({
+  color:     0x1a1f26,
+  roughness: 0.85,
+  metalness: 0.05,
+  side:      THREE.FrontSide,
+});
+
+const floorMesh = new THREE.Mesh(floorGeo, floorMat);
+floorMesh.rotation.x = -Math.PI / 2;   // XY-Plane → horizontal
+floorMesh.receiveShadow = true;
+floorMesh.visible = false;
+scene.add(floorMesh);
+
+// Axes
+const axesHelper = new THREE.AxesHelper(0.5);
+scene.add(axesHelper);
+
+// Scene group for loaded model
+let modelGroup = null;
+let bboxHelper = null;
+let autoRotate = false;
+let currentModel = null;
+let nodeObjects = {};    // name -> THREE.Object3D
+let selectedNodeName = null;
+let wireOpacity = 0;
+let meshOpacity = 1.0;
+let selectionHighlight = null;
+
+// Name of the supermodel still expected (null = none pending)
+let pendingSupermodel = null;
+
+// Implementation of the SkeletonHelpers
+let skeletonHelper = null;
+
+// ─────────────────────────────────────────────
+//  Orbit Controls (custom, minimal)
+// ─────────────────────────────────────────────
+const orbit = {
+  theta: 0.5, phi: 1.1, radius: 5,
+  target: new THREE.Vector3(0, 0, 0),
+  dragging: false, panning: false,
+  lastX: 0, lastY: 0,
+  panStart: null,
+  // FIX: Screen-space pan offset, decoupled from orbit.target.
+  // Panning used to permanently shift orbit.target (the rotation pivot) in
+  // world space — once Auto-Rotate was enabled afterwards, the camera then
+  // orbited around that shifted point instead of the model's real center,
+  // causing the model to swing out of view and back during rotation.
+  // panX/panY instead store a screen-space offset (right/up in camera basis,
+  // world units) that is re-applied every frame in updateCamera() using the
+  // *current* view direction. orbit.target itself always stays the model's
+  // true center (set on load, see scene_build.js), so rotation is always
+  // clean — and the user's deliberate "push it aside" pan is preserved as a
+  // constant on-screen position throughout the rotation.
+  panX: 0, panY: 0,
+};
+
+// Scratch objects for updateCamera() — avoids per-frame allocation during
+// Auto-Rotate (called every animation frame in that mode).
+const _camBasePos  = new THREE.Vector3();
+const _camDir      = new THREE.Vector3();
+const _camRight    = new THREE.Vector3();
+const _camUp       = new THREE.Vector3();
+const _camOffset   = new THREE.Vector3();
+const _camLookAt   = new THREE.Vector3();
+
+function updateCamera() {
+  orbit.phi = Math.max(0.05, Math.min(Math.PI - 0.05, orbit.phi));
+  orbit.radius = Math.max(0.1, Math.min(500, orbit.radius));
+  const x = orbit.radius * Math.sin(orbit.phi) * Math.sin(orbit.theta);
+  const y = orbit.radius * Math.cos(orbit.phi);
+  const z = orbit.radius * Math.sin(orbit.phi) * Math.cos(orbit.theta);
+
+  // Base camera position, orbiting the true rotation center (orbit.target).
+  _camBasePos.set(
+    orbit.target.x + x,
+    orbit.target.y + y,
+    orbit.target.z + z
+  );
+
+  if (orbit.panX === 0 && orbit.panY === 0) {
+    camera.position.copy(_camBasePos);
+    camera.lookAt(orbit.target);
+    return;
+  }
+
+  // FIX: Re-derive right/up from the current view direction every call
+  // (not from camera.getWorldDirection(), which lags one frame behind)
+  // so the pan offset always reads as the same screen-space position,
+  // regardless of how theta/phi have rotated since the pan was applied.
+  _camDir.subVectors(orbit.target, _camBasePos).normalize();
+  _camRight.crossVectors(_camDir, camera.up).normalize();
+  _camUp.crossVectors(_camRight, _camDir).normalize();
+
+  _camOffset.set(0, 0, 0)
+    .addScaledVector(_camRight, orbit.panX)
+    .addScaledVector(_camUp, orbit.panY);
+
+  camera.position.copy(_camBasePos).add(_camOffset);
+  _camLookAt.copy(orbit.target).add(_camOffset);
+  camera.lookAt(_camLookAt);
+}
+
+canvas.addEventListener('mousedown', e => {
+  if (e.button === 0) { orbit.dragging = true; }
+  if (e.button === 1 || e.button === 2) { orbit.panning = true; }
+  orbit.lastX = e.clientX; orbit.lastY = e.clientY;
+});
+
+window.addEventListener('mouseup', () => { orbit.dragging = false; orbit.panning = false; });
+window.addEventListener('mousemove', e => {
+  const dx = e.clientX - orbit.lastX;
+  const dy = e.clientY - orbit.lastY;
+  orbit.lastX = e.clientX; orbit.lastY = e.clientY;
+  if (orbit.dragging) {
+    orbit.theta -= dx * 0.007;
+    orbit.phi   += (e.shiftKey ? -dy : dy) * 0.007;
+    updateCamera();
+  }
+  if (orbit.panning) {
+    // FIX: accumulate into the screen-space pan offset instead of moving
+    // orbit.target — keeps the rotation pivot at the model's true center.
+    // Sign convention matches the previous target-shift behaviour exactly.
+    const speed = orbit.radius * 0.001;
+    orbit.panX += -dx * speed;
+    orbit.panY +=  dy * speed;
+    updateCamera();
+  }
+});
+
+canvas.addEventListener('wheel', e => {
+  orbit.radius *= 1 + e.deltaY * 0.001;
+  updateCamera();
+  e.preventDefault();
+}, { passive: false });
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+// Touch support (1-finger orbit, 2-finger pinch-zoom + pan)
+let _pinchDist0  = null;  // Finger spacing at the start of the pinch
+let _pinchMidX   = null;  // Center Point X at Start (2-Finger Pan)
+let _pinchMidY   = null;
+
+canvas.addEventListener('touchstart', e => {
+  if (e.touches.length === 1) {
+    orbit.dragging = true;
+    orbit.lastX    = e.touches[0].clientX;
+    orbit.lastY    = e.touches[0].clientY;
+    _pinchDist0    = null;
+    _pinchMidX     = null;
+  } else if (e.touches.length === 2) {
+    orbit.dragging = false;
+    const dx = e.touches[1].clientX - e.touches[0].clientX;
+    const dy = e.touches[1].clientY - e.touches[0].clientY;
+    _pinchDist0 = Math.hypot(dx, dy);
+    _pinchMidX  = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+    _pinchMidY  = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+  }
+}, { passive: true });
+
+canvas.addEventListener('touchend', e => {
+  if (e.touches.length === 0) {
+    orbit.dragging = false;
+    _pinchDist0 = null;
+    _pinchMidX  = null;
+  } else if (e.touches.length === 1) {
+    // 2→1 Fingers: Reinitialize orbit to avoid a position jump.
+    orbit.dragging = true;
+    orbit.lastX    = e.touches[0].clientX;
+    orbit.lastY    = e.touches[0].clientY;
+    _pinchDist0    = null;
+    _pinchMidX     = null;
+  }
+}, { passive: true });
+
+canvas.addEventListener('touchmove', e => {
+  if (e.touches.length === 1 && orbit.dragging) {
+    // ── 1 Finger: Orbit ────────────────────────────────────────────────
+    const dx = e.touches[0].clientX - orbit.lastX;
+    const dy = e.touches[0].clientY - orbit.lastY;
+    orbit.lastX    = e.touches[0].clientX;
+    orbit.lastY    = e.touches[0].clientY;
+    orbit.theta -= dx * 0.007;
+    orbit.phi   += dy * 0.007;
+    updateCamera();
+  } else if (e.touches.length === 2) {
+    // ── 2 Finger: Pinch-Zoom ───────────────────────────────────────────
+    const dx   = e.touches[1].clientX - e.touches[0].clientX;
+    const dy   = e.touches[1].clientY - e.touches[0].clientY;
+    const dist = Math.hypot(dx, dy);
+
+    if (_pinchDist0 !== null && dist > 0) {
+      // Spread → smaller radius → zoom in; Pinch → zoom out
+      orbit.radius *= _pinchDist0 / dist;
+      updateCamera();
+    }
+    _pinchDist0 = dist;
+
+    // ── 2 Fingers: Pan (Shift Center) ─────────────────────────────────
+    const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+    const midY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+    if (_pinchMidX !== null) {
+      // FIX: same screen-space offset accumulation as the mouse pan above,
+      // instead of permanently shifting orbit.target.
+      const pdx   = midX - _pinchMidX;
+      const pdy   = midY - _pinchMidY;
+      const speed = orbit.radius * 0.001;
+      orbit.panX += -pdx * speed;
+      orbit.panY +=  pdy * speed;
+      updateCamera();
+    }
+    _pinchMidX = midX;
+    _pinchMidY = midY;
+  }
+  e.preventDefault();
+}, { passive: false });
+
+// ─────────────────────────────────────────────
+//  Mesh Pick (Left Click → select node)
+// ─────────────────────────────────────────────
+const _pickRaycaster = new THREE.Raycaster();
+
+canvas.addEventListener('click', e => {
+  // Only when Ctrl or Cmd is pressed and a selection is made with the left mouse button.
+  if (!e.ctrlKey || e.metaKey) return;
+  if (!modelGroup) return;
+
+  const rect = canvas.getBoundingClientRect();
+  const ndc = new THREE.Vector2(
+    ((e.clientX - rect.left) / rect.width)  *  2 - 1,
+    ((e.clientY - rect.top)  / rect.height) * -2 + 1
+  );
+
+  _pickRaycaster.setFromCamera(ndc, camera);
+  const hits = _pickRaycaster.intersectObject(modelGroup, true);
+
+  for (const hit of hits) {
+    let obj = hit.object;
+
+    // Skip wireframe and backface children
+    if (obj.userData.isWireframe || obj.userData.isBackface || obj.userData.isAABB) continue;
+
+    // Skip emitter-preview-quads
+    if (obj.userData.isEmitterPreview) continue;
+
+    // Ascend to the named node (children of groups, etc.)
+    while (obj && !obj.name) obj = obj.parent;
+    if (!obj || !obj.name) continue;
+
+    // Select only nodes known to the scene graph
+    if (!nodeObjects[obj.name]) continue;
+
+    selectNode(obj.name);
+    return;
+  }
+  
+  // Ctrl+Click hit nothing selectable → deselect (empty space, floor, grid, etc.)
+  if (typeof closeNodeDetail === 'function') closeNodeDetail();
+});
+
+// ─────────────────────────────────────────────

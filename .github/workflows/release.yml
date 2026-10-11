@@ -1,0 +1,172 @@
+# ═══════════════════════════════════════════════════════════
+#  NWN MDL Viewer — Create GitHub Release
+#
+#  Workflow:
+#    1. update-wasm   → Ensures cleanmodels.wasm is up to date
+#    2. release       → Builds standalone HTML + source ZIP and publishes
+#
+#  Triggers:
+#    - Push of a version tag:  git tag v1.2.3 && git push --tags
+#    - Manually via the Actions tab (workflow_dispatch)
+# ═══════════════════════════════════════════════════════════
+
+name: Create Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release tag (e.g. v1.0.0)'
+        required: true
+        default: 'v0.0.0-alpha'
+
+permissions:
+  contents: write
+
+jobs:
+
+  # ── Job 1: Keep WASM up to date ─────────────────────────────────────────────
+  # Invokes update-wasm.yml as a reusable workflow. If there is no new 
+  # upstream release, this job terminates in ~10 seconds without a commit.
+  update-wasm:
+    uses: ./.github/workflows/update-wasm.yml
+    permissions:
+      contents: write
+
+  # ── Job 2: Build & Release ─────────────────────────────────────────────────
+  release:
+    needs: update-wasm
+    runs-on: ubuntu-latest
+    outputs:
+      tag_name: ${{ steps.tag.outputs.name }}
+
+    steps:
+      # Fresh checkout — important: update-wasm might have pushed a new commit
+      # (new WASM version). By using ref: github.ref_name, we always fetch
+      # the latest state including any potential WASM updates.
+      - name: Checkout (after potential WASM update)
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+
+      - name: Determine tag name
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "name=${{ github.event.inputs.tag_name }}" >> $GITHUB_OUTPUT
+          else
+            echo "name=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run build script
+        run: python build.py --version "${{ steps.tag.outputs.name }}"
+
+      - name: Rename dist file for release
+        run: cp dist/index.html dist/nwn_mdl_webviewer.html
+
+      - name: Create source ZIP
+        run: |
+          zip -r dist/nwn-mdl-webviewer-src.zip \
+            css/ \
+            js/ \
+            lang/ \
+            vendor/ \
+            wasm/ \
+            scripts/ \
+            themes/ \
+            docs/ \
+            index.html \
+            build.py
+
+      # WASM version info for the release notes
+      - name: Determine WASM version
+        id: wasm_ver
+        run: |
+          VER="(unknown)"
+          if [ -f "wasm/cleanmodels.version" ]; then
+            VER=$(cat wasm/cleanmodels.version)
+          fi
+          echo "version=$VER" >> $GITHUB_OUTPUT
+
+      # Determine the previous release tag for the diff/compare link.
+      # fetch-depth: 1 above only fetches the tip — we need all tags for this.
+      # We sort by version (--sort=-version:refname) and skip the current tag
+      # to get the one directly before it.
+      - name: Determine previous tag
+        id: prev_tag
+        run: |
+          git fetch --tags --quiet
+          CURRENT="${{ steps.tag.outputs.name }}"
+          PREV=$(git tag --sort=-version:refname \
+            | grep -v "^${CURRENT}$" \
+            | head -1)
+          if [ -n "$PREV" ]; then
+            echo "tag=$PREV" >> $GITHUB_OUTPUT
+            echo "Previous tag: $PREV"
+          else
+            echo "tag=" >> $GITHUB_OUTPUT
+            echo "No previous tag found — this appears to be the first release."
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          name: "NWN MDL WebViewer ${{ steps.tag.outputs.name }}"
+          body: |
+            ## NWN MDL WebViewer ${{ steps.tag.outputs.name }}
+
+            ### Downloads
+            | File | Description |
+            |---|---|
+            | `nwn_mdl_webviewer.html` | **Standalone Version** — simply open in your browser, no server required |
+            | `nwn-mdl-webviewer-src.zip` | Complete source code (HTML + CSS + JS + WASM + lang/ + themes/ + docs/) |
+
+            ### Usage
+            1. Download `nwn_mdl_webviewer.html`
+            2. Open it in your browser (Chrome, Firefox, Edge)
+            3. Drag and drop `.mdl` + texture files (`.tga`, `.dds`) into the drop zone
+
+            ### Supported Formats
+            - ASCII MDL (decompiled with NWN Explorer or similar)
+            - Binary MDL (automatically decompiled via cleanmodels WASM)
+            - NWN/Bioware DDS (20-byte header, DXT1/DXT5)
+            - Standard DDS (ATI1/BC4, ATI2/BC5, DXT1/DXT3/DXT5) — NWN:EE Normal/Specular Maps
+            - MTR material files (Normal Mapping, Specular, Roughness, PBR parameters)
+            - TGA (Type 2/10, 16/24/32-bit)
+            - PLT (BioWare Palette Texture)
+
+            ### Components
+            | Component | Version |
+            |---|---|
+            | cleanmodels WASM | `${{ steps.wasm_ver.outputs.version }}` |
+
+            ### Changes
+            ${{ steps.prev_tag.outputs.tag != '' && format('**[Full diff: {0}...{1}](https://github.com/{2}/compare/{0}...{1})**', steps.prev_tag.outputs.tag, steps.tag.outputs.name, github.repository) || '_No previous release found — this is the first release._' }}
+          draft: false
+          prerelease: ${{ contains(steps.tag.outputs.name, '-') }}
+          files: |
+            dist/nwn_mdl_webviewer.html
+            dist/nwn-mdl-webviewer-src.zip
+
+  # ── Job 3: Deploy to GitHub Pages ──────────────────────────────────────────
+  # Calls pages.yml as a reusable workflow and passes the known version.
+  # This ensures the correct version number always ends up on GitHub Pages.
+  deploy-pages:
+    needs: release
+    uses: ./.github/workflows/pages.yml
+    with:
+      version: ${{ needs.release.outputs.tag_name }}
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
