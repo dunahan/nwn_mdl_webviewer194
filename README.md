@@ -1,3 +1,1 @@
-This is a temporary Repository for MacOS Users that have problems since the version 2 of the Neverwinter Nigths Model Webviewer (https://github.com/dunahan/nwn_mdl_webviewer).
-
-The issue for this problem is set and will be addressed as soon as possible.
+This is a version of the viewer built with Three.js that does not require WebGL2. Further development will continue on nwn_mdl_webviewer (https://github.com/dunahan/nwn_mdl_webviewer), but enhancements implemented there will also be brought over here whenever possible.
