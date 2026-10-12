@@ -86,6 +86,8 @@ const I18N_BUNDLE = {
     plt_layer_7:          'Leather 2',
     plt_layer_8:          'Tattoo 1',
     plt_layer_9:          'Tattoo 2',
+    plt_expand_all:       'Expand all',
+    plt_collapse_all:     'Collapse all',
     // decompile loading msg
     dcmp_title:           'Decompiling…',
     dcmp_hint:            'Binary MDL · Please wait',
@@ -305,6 +307,8 @@ const I18N_BUNDLE = {
     plt_layer_7:          'Leder 2',
     plt_layer_8:          'Tattoo 1',
     plt_layer_9:          'Tattoo 2',
+    plt_expand_all:       'Alle aufklappen',
+    plt_collapse_all:     'Alle zuklappen',
     // decompile loading msg
     dcmp_title:           'Dekompiliere…',
     dcmp_hint:            'Binäres MDL · Bitte warten',
