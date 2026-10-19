@@ -252,9 +252,13 @@ const HotReload = (() => {
         // released as soon as the GC collects the short-lived File.
         let file = await entry.handle.getFile();
         if (file.lastModified <= entry.lastModified) { file = null; continue; }
-        entry.lastModified = file.lastModified;
+        const mtime  = file.lastModified;
         const buffer = await file.arrayBuffer();
         file = null;  // release OS handle (Windows/Chromium lock fix)
+        // FIX: advance lastModified only after a successful read. A failed read
+        // (editor still holding the file on Windows) is retried on the next poll
+        // instead of being lost until the next save.
+        entry.lastModified = mtime;
         await _onFileChanged(key, entry.ext, buffer);
       } catch (_) {
         // Handle lost (file deleted / folder no longer accessible) → skip
