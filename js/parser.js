@@ -177,14 +177,21 @@ function parseFullAnimNode(lines, start) {
       // value(3) + tangentIn(3) + tangentOut(3) = 9 Floats/Key
       const count = (t.length > 1 && !isNaN(parseInt(t[1]))) ? parseInt(t[1]) : 0;
       const res = readAllKeys(i + 1, 9, count);
-      data.posKeys = res.keys.map(k => ({ t: k.t, x: k.vals[0], y: k.vals[1], z: k.vals[2] }));
+      // tangentIn/tangentOut are kept (animation.js evaluates them as a cubic
+      // Hermite curve, see hermite1D()); plain positionkey entries carry none.
+      data.posKeys = res.keys.map(k => ({
+        t: k.t, x: k.vals[0], y: k.vals[1], z: k.vals[2],
+        tanIn:  [k.vals[3], k.vals[4], k.vals[5]],
+        tanOut: [k.vals[6], k.vals[7], k.vals[8]],
+      }));
       i = res.next;
       continue;
     } else if (k === 'scalebezierkey') {
       // value(1) + tangentIn(1) + tangentOut(1) = 3 Floats/Key
       const count = (t.length > 1 && !isNaN(parseInt(t[1]))) ? parseInt(t[1]) : 0;
       const res = readAllKeys(i + 1, 3, count);
-      data.scaleKeys = res.keys.map(k => ({ t: k.t, s: k.vals[0] }));
+      // Same principle as positionbezierkey, scalar.
+      data.scaleKeys = res.keys.map(k => ({ t: k.t, s: k.vals[0], tanIn: k.vals[1], tanOut: k.vals[2] }));
       i = res.next;
       continue;
     } else if (k.endsWith('bezierkey')) {
